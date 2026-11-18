@@ -49,6 +49,10 @@ object MoodleTokenParser {
 
     fun parseCallbackUrl(callbackUrl: String): ParsedMoodleToken? {
         val trimmed = callbackUrl.trim()
+        if (trimmed.matches(Regex("^[a-fA-F0-9]{24,64}$"))) {
+            return ParsedMoodleToken(token = trimmed)
+        }
+
         val tokenMarkerIndex = trimmed.indexOf("token=", ignoreCase = true)
         if (tokenMarkerIndex == -1) return null
 

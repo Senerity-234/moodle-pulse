@@ -35,13 +35,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.School
@@ -691,7 +691,7 @@ private fun AssignmentCard(
 
             if (item.url.isNotBlank()) {
                 IconButton(onClick = { onOpenUrl(item.url) }) {
-                    Icon(Icons.Default.OpenInNew, contentDescription = "在瀏覽器開啟")
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "在瀏覽器開啟")
                 }
             }
         }
@@ -820,7 +820,7 @@ private fun AnnouncementCard(
                         Text("前往 Moodle")
                         Spacer(modifier = Modifier.width(4.dp))
                         Icon(
-                            Icons.Default.OpenInNew,
+                            Icons.AutoMirrored.Filled.OpenInNew,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp)
                         )
