@@ -59,7 +59,7 @@ object AnnouncementSummarizer {
             .replace(Regex("(?i)</(p|div|li|h[1-6]|tr)>"), "\n")
         val doc: Document = Jsoup.parse(withLineHints)
         doc.outputSettings().prettyPrint(false)
-        val rawText = doc.text()
+        val rawText = doc.wholeText()
 
         return rawText
             .replace("\r\n", "\n")

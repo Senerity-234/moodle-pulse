@@ -34,10 +34,23 @@ jobs:
           gradle-version: '8.7'
 
       - name: Run unit tests
-        run: gradle testDebugUnitTest
+        run: |
+          set -o pipefail
+          gradle testDebugUnitTest --console=plain --no-daemon 2>&1 | tee test.log
+
+      - name: Report test/compile failure summary
+        if: failure()
+        run: |
+          echo "### Gradle Failure Tail" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 80 test.log >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "^(e: |FAILURE:|> Task .* FAILED|.*Exception|.*Error)" test.log | head -n 15 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done || true
 
       - name: Build Debug APK
-        run: gradle assembleDebug
+        run: gradle assembleDebug --console=plain --no-daemon
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
