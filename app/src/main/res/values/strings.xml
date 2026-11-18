@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Moodle 課程小幫手</string>
+    <string name="widget_name">Moodle 作業與通知摘要</string>
+    <string name="widget_description">即時彙整這學期 Moodle 作業截止倒數與最新課程通知摘要</string>
+    <string name="widget_empty_logged_out">尚未登入 Moodle，點擊開啟 App 完成學校 SSO 登入</string>
+    <string name="widget_empty_no_items">目前沒有待辦作業或近期通知，做得好！</string>
+</resources>
