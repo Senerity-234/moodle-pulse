@@ -36,6 +36,16 @@ class SecureTokenStore(context: Context) {
 
     fun getGeminiApiKey(): String? = readEncrypted(KEY_GEMINI_API_KEY)
 
+    fun saveGitHubToken(token: String) {
+        if (token.isBlank()) {
+            prefs.edit().remove(KEY_GITHUB_TOKEN).apply()
+        } else {
+            saveEncrypted(KEY_GITHUB_TOKEN, token.trim())
+        }
+    }
+
+    fun getGitHubToken(): String? = readEncrypted(KEY_GITHUB_TOKEN)
+
     private fun saveEncrypted(key: String, plainText: String) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
@@ -95,5 +105,6 @@ class SecureTokenStore(context: Context) {
         private const val PREFS_NAME = "moodle_pulse_secure_prefs"
         private const val KEY_MOODLE_TOKEN = "moodle_ws_token"
         private const val KEY_GEMINI_API_KEY = "gemini_api_key"
+        private const val KEY_GITHUB_TOKEN = "github_pat_token"
     }
 }

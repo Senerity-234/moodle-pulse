@@ -54,7 +54,11 @@ class LocalCacheRepository(context: Context) {
 
     fun clearSessionData() {
         synchronized(lock) {
-            val resetSettings = AppSettings()
+            val current = _settingsFlow.value
+            val resetSettings = AppSettings(
+                githubUpdateRepo = current.githubUpdateRepo,
+                autoCheckAppUpdate = current.autoCheckAppUpdate
+            )
             val resetData = CachedDashboardData()
             writeAtomic(settingsFile, json.encodeToString(resetSettings))
             writeAtomic(dashboardFile, json.encodeToString(resetData))

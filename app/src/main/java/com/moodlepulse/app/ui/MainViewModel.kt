@@ -3,6 +3,7 @@ package com.moodlepulse.app.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.moodlepulse.app.BuildConfig
 import com.moodlepulse.app.MoodlePulseApp
 import com.moodlepulse.app.model.AppSettings
 import com.moodlepulse.app.model.CachedDashboardData
@@ -11,14 +12,17 @@ import com.moodlepulse.app.model.SsoLoginMethod
 import com.moodlepulse.app.network.MoodleTokenParser
 import com.moodlepulse.app.sync.MoodleSyncWorker
 import com.moodlepulse.app.sync.SyncOutcome
+import com.moodlepulse.app.update.GitHubReleaseInfo
+import com.moodlepulse.app.update.GitHubReleaseParser
+import com.moodlepulse.app.update.UpdateCheckResult
 import com.moodlepulse.app.widget.MoodleWidgetProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -29,6 +33,18 @@ enum class DashboardFilter {
     ANNOUNCEMENTS
 }
 
+data class AppUpdateUiState(
+    val hasGitHubTokenSaved: Boolean = false,
+    val isChecking: Boolean = false,
+    val isDownloading: Boolean = false,
+    val downloadProgressPercent: Int = 0,
+    val availableUpdate: GitHubReleaseInfo? = null,
+    val showUpdateDialog: Boolean = false,
+    val downloadedApkFile: File? = null,
+    val pendingInstallTrigger: Boolean = false,
+    val statusMessage: String? = null
+)
+
 data class MainUiState(
     val isLoggedIn: Boolean = false,
     val settings: AppSettings = AppSettings(),
@@ -38,7 +54,8 @@ data class MainUiState(
     val hasCalendarPermission: Boolean = false,
     val writableCalendars: List<DeviceCalendarInfo> = emptyList(),
     val hasGeminiKeySaved: Boolean = false,
-    val selectedFilter: DashboardFilter = DashboardFilter.ALL
+    val selectedFilter: DashboardFilter = DashboardFilter.ALL,
+    val updateState: AppUpdateUiState = AppUpdateUiState()
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -52,6 +69,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _hasCalendarPermission = MutableStateFlow(app.calendarSyncManager.hasCalendarPermissions())
     private val _isLoggedIn = MutableStateFlow(!app.tokenStore.getMoodleToken().isNullOrBlank())
     private val _hasGeminiKey = MutableStateFlow(!app.tokenStore.getGeminiApiKey().isNullOrBlank())
+    private val _updateState = MutableStateFlow(
+        AppUpdateUiState(hasGitHubTokenSaved = !app.tokenStore.getGitHubToken().isNullOrBlank())
+    )
 
     val uiState: StateFlow<MainUiState> = combine(
         app.cacheRepository.settingsFlow,
@@ -62,7 +82,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _calendars,
         _hasCalendarPermission,
         _isLoggedIn,
-        _hasGeminiKey
+        _hasGeminiKey,
+        _updateState
     ) { values ->
         val settings = values[0] as AppSettings
         val dashboard = values[1] as CachedDashboardData
@@ -74,6 +95,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val calPerm = values[6] as Boolean
         val loggedIn = values[7] as Boolean
         val hasGemini = values[8] as Boolean
+        val updateState = values[9] as AppUpdateUiState
 
         MainUiState(
             isLoggedIn = loggedIn,
@@ -84,7 +106,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             hasCalendarPermission = calPerm,
             writableCalendars = calendars,
             hasGeminiKeySaved = hasGemini,
-            selectedFilter = filter
+            selectedFilter = filter,
+            updateState = updateState
         )
     }.stateIn(
         scope = viewModelScope,
@@ -94,12 +117,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             settings = app.cacheRepository.getSettings(),
             dashboard = app.cacheRepository.getDashboardData(),
             hasCalendarPermission = app.calendarSyncManager.hasCalendarPermissions(),
-            hasGeminiKeySaved = !app.tokenStore.getGeminiApiKey().isNullOrBlank()
+            hasGeminiKeySaved = !app.tokenStore.getGeminiApiKey().isNullOrBlank(),
+            updateState = AppUpdateUiState(
+                hasGitHubTokenSaved = !app.tokenStore.getGitHubToken().isNullOrBlank()
+            )
         )
     )
 
     init {
         refreshCalendarPermissions()
+        val initialSettings = app.cacheRepository.getSettings()
+        if (initialSettings.autoCheckAppUpdate && initialSettings.githubUpdateRepo.isNotBlank()) {
+            checkForAppUpdate(manual = false)
+        }
     }
 
     fun refreshSessionState() {
@@ -283,5 +313,167 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isLoggedIn.value = false
         _statusBanner.value = "已登出並清除本機資料"
         MoodleWidgetProvider.notifyWidgetsDataChanged(app)
+    }
+
+    fun updateGitHubRepo(rawRepo: String) {
+        val slug = GitHubReleaseParser.normalizeRepoSlug(rawRepo)
+        if (slug == null) {
+            _statusBanner.value = "GitHub Repo 格式不正確，請輸入 owner/repo"
+            return
+        }
+        app.cacheRepository.updateSettings {
+            it.copy(githubUpdateRepo = slug, dismissedUpdateTag = "")
+        }
+        _updateState.update {
+            it.copy(availableUpdate = null, downloadedApkFile = null, statusMessage = "已儲存更新來源：$slug")
+        }
+        _statusBanner.value = "已更新 GitHub 檢查來源：$slug"
+    }
+
+    fun updateAutoCheckAppUpdate(enabled: Boolean) {
+        app.cacheRepository.updateSettings { it.copy(autoCheckAppUpdate = enabled) }
+    }
+
+    fun saveGitHubToken(tokenInput: String) {
+        app.tokenStore.saveGitHubToken(tokenInput)
+        val hasToken = !app.tokenStore.getGitHubToken().isNullOrBlank()
+        _updateState.update {
+            it.copy(
+                hasGitHubTokenSaved = hasToken,
+                statusMessage = if (hasToken) "已儲存私人 Repo Token" else "已清除 GitHub Token"
+            )
+        }
+        _statusBanner.value = if (hasToken) "已安全儲存 GitHub Token" else "已清除 GitHub Token"
+    }
+
+    fun checkForAppUpdate(manual: Boolean = true) {
+        if (_updateState.value.isChecking || _updateState.value.isDownloading) return
+        val settings = app.cacheRepository.getSettings()
+        val repo = settings.githubUpdateRepo
+        if (repo.isBlank()) {
+            if (manual) _statusBanner.value = "請先設定 GitHub Repo（例如 Senerity-234/moodle-pulse）"
+            return
+        }
+
+        viewModelScope.launch {
+            _updateState.update {
+                it.copy(
+                    isChecking = true,
+                    statusMessage = if (manual) "正在檢查 GitHub 最新版本..." else it.statusMessage
+                )
+            }
+
+            val result = app.updateManager.checkForUpdate(
+                repoInput = repo,
+                currentVersionName = BuildConfig.VERSION_NAME,
+                githubToken = app.tokenStore.getGitHubToken()
+            )
+
+            when (result) {
+                is UpdateCheckResult.UpdateAvailable -> {
+                    val shouldShowDialog = manual || result.release.tagName != settings.dismissedUpdateTag
+                    _updateState.update {
+                        it.copy(
+                            isChecking = false,
+                            availableUpdate = result.release,
+                            showUpdateDialog = shouldShowDialog,
+                            downloadedApkFile = null,
+                            statusMessage = "發現新版本 ${result.release.tagName}"
+                        )
+                    }
+                    if (manual && result.release.apkDownloadUrl.isNullOrBlank() && result.release.apkAssetApiUrl.isNullOrBlank()) {
+                        _statusBanner.value = "偵測到新版本 ${result.release.tagName}，但該 Release 未附加 APK 檔案"
+                    }
+                }
+                is UpdateCheckResult.UpToDate -> {
+                    _updateState.update {
+                        it.copy(
+                            isChecking = false,
+                            availableUpdate = null,
+                            showUpdateDialog = false,
+                            statusMessage = if (manual) "目前 v${result.currentVersion} 已是最新版本" else it.statusMessage
+                        )
+                    }
+                    if (manual) {
+                        _statusBanner.value = "目前 v${result.currentVersion} 已是最新版本"
+                    }
+                }
+                is UpdateCheckResult.Error -> {
+                    _updateState.update {
+                        it.copy(
+                            isChecking = false,
+                            statusMessage = if (manual) result.message else it.statusMessage
+                        )
+                    }
+                    if (manual) {
+                        _statusBanner.value = result.message
+                    }
+                }
+            }
+        }
+    }
+
+    fun downloadAndInstallUpdate() {
+        val release = _updateState.value.availableUpdate ?: return
+        if (_updateState.value.isDownloading) return
+
+        val cached = _updateState.value.downloadedApkFile
+        if (cached != null && cached.exists() && cached.length() > 0L) {
+            _updateState.update { it.copy(pendingInstallTrigger = true) }
+            return
+        }
+
+        viewModelScope.launch {
+            _updateState.update {
+                it.copy(
+                    isDownloading = true,
+                    downloadProgressPercent = 0,
+                    statusMessage = "正在下載 ${release.tagName}..."
+                )
+            }
+
+            runCatching {
+                app.updateManager.downloadApk(
+                    release = release,
+                    githubToken = app.tokenStore.getGitHubToken(),
+                    onProgress = { pct ->
+                        _updateState.update { state -> state.copy(downloadProgressPercent = pct) }
+                    }
+                )
+            }.onSuccess { apkFile ->
+                _updateState.update {
+                    it.copy(
+                        isDownloading = false,
+                        downloadProgressPercent = 100,
+                        downloadedApkFile = apkFile,
+                        pendingInstallTrigger = true,
+                        statusMessage = "下載完成，準備安裝 ${release.tagName}"
+                    )
+                }
+            }.onFailure { err ->
+                val msg = err.message ?: "下載失敗"
+                _updateState.update {
+                    it.copy(
+                        isDownloading = false,
+                        downloadProgressPercent = 0,
+                        statusMessage = msg
+                    )
+                }
+                _statusBanner.value = "更新下載失敗：$msg"
+            }
+        }
+    }
+
+    fun consumeInstallTrigger() {
+        _updateState.update { it.copy(pendingInstallTrigger = false) }
+    }
+
+    fun dismissUpdateDialog(skipThisVersion: Boolean) {
+        val tag = _updateState.value.availableUpdate?.tagName
+        if (skipThisVersion && !tag.isNullOrBlank()) {
+            app.cacheRepository.updateSettings { it.copy(dismissedUpdateTag = tag) }
+            _statusBanner.value = "已略過版本 $tag（仍可在設定手動檢查）"
+        }
+        _updateState.update { it.copy(showUpdateDialog = false) }
     }
 }

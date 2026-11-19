@@ -3,9 +3,18 @@ name: Build MoodlePulse Android APK
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '選填：建立 GitHub Release 的版本標籤（例如 v1.0.1），留空則只編譯不發布 Release'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -33,10 +42,60 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Resolve build version and signing mode
+        id: meta
+        env:
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_NUMBER: ${{ github.run_number }}
+          HAS_RELEASE_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+          HAS_DEBUG_KEYSTORE: ${{ secrets.DEBUG_KEYSTORE_BASE64 != '' }}
+        run: |
+          RELEASE_TAG=""
+          if [ "$REF_TYPE" = "tag" ]; then
+            RELEASE_TAG="$REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            RELEASE_TAG="$INPUT_TAG"
+          fi
+
+          if [ -n "$RELEASE_TAG" ]; then
+            VERSION_NAME="${RELEASE_TAG#v}"
+            VERSION_NAME="${VERSION_NAME#V}"
+          else
+            VERSION_NAME="1.0.0"
+          fi
+          VERSION_CODE=$((RUN_NUMBER + 1))
+
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "use_release_signing=${HAS_RELEASE_KEYSTORE}" >> "$GITHUB_OUTPUT"
+          echo "use_fixed_debug_keystore=${HAS_DEBUG_KEYSTORE}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Restore fixed debug keystore (if configured)
+        if: steps.meta.outputs.use_fixed_debug_keystore == 'true'
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p "$HOME/.android"
+          echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+
+      - name: Decode release keystore (if configured)
+        if: steps.meta.outputs.use_release_signing == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+
       - name: Run unit tests
         run: |
           set -o pipefail
-          gradle testDebugUnitTest --console=plain --no-daemon 2>&1 | tee test.log
+          gradle testDebugUnitTest --console=plain --no-daemon \
+            -PappVersionName="${{ steps.meta.outputs.version_name }}" \
+            -PappVersionCode="${{ steps.meta.outputs.version_code }}" 2>&1 | tee test.log
 
       - name: Report test/compile failure summary
         if: failure()
@@ -49,11 +108,37 @@ jobs:
             echo "::error::${line}"
           done || true
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --console=plain --no-daemon
+      - name: Build Signed Release APK
+        if: steps.meta.outputs.use_release_signing == 'true'
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          gradle assembleRelease --console=plain --no-daemon \
+            -PappVersionName="${{ steps.meta.outputs.version_name }}" \
+            -PappVersionCode="${{ steps.meta.outputs.version_code }}"
+          cp app/build/outputs/apk/release/app-release.apk "MoodlePulse-v${{ steps.meta.outputs.version_name }}-release.apk"
 
-      - name: Upload Debug APK
+      - name: Build Debug APK
+        if: steps.meta.outputs.use_release_signing != 'true'
+        run: |
+          gradle assembleDebug --console=plain --no-daemon \
+            -PappVersionName="${{ steps.meta.outputs.version_name }}" \
+            -PappVersionCode="${{ steps.meta.outputs.version_code }}"
+          cp app/build/outputs/apk/debug/app-debug.apk "MoodlePulse-v${{ steps.meta.outputs.version_name }}-debug.apk"
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MoodlePulse-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: MoodlePulse-apk
+          path: MoodlePulse-v*.apk
+
+      - name: Publish GitHub Release
+        if: steps.meta.outputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          name: MoodlePulse ${{ steps.meta.outputs.release_tag }}
+          generate_release_notes: true
+          files: MoodlePulse-v*.apk

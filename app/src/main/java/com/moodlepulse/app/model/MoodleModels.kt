@@ -42,7 +42,10 @@ data class AppSettings(
     val secondReminderMinutesBefore: Int = 120,
     val includeSubmittedInCalendar: Boolean = true,
     val widgetFilterMode: WidgetFilterMode = WidgetFilterMode.ALL,
-    val useGeminiSummary: Boolean = false
+    val useGeminiSummary: Boolean = false,
+    val githubUpdateRepo: String = "Senerity-234/moodle-pulse",
+    val autoCheckAppUpdate: Boolean = true,
+    val dismissedUpdateTag: String = ""
 )
 
 @Serializable

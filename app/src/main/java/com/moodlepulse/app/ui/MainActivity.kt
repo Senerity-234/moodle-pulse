@@ -47,7 +47,9 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Widgets
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -58,6 +60,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -91,6 +94,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.moodlepulse.app.BuildConfig
+import com.moodlepulse.app.MoodlePulseApp
 import com.moodlepulse.app.auth.SsoLoginActivity
 import com.moodlepulse.app.model.AnnouncementItem
 import com.moodlepulse.app.model.AssignmentItem
@@ -99,8 +104,10 @@ import com.moodlepulse.app.model.DeadlineModuleType
 import com.moodlepulse.app.model.SsoLoginMethod
 import com.moodlepulse.app.network.MoodleTokenParser
 import com.moodlepulse.app.ui.theme.MoodlePulseTheme
+import com.moodlepulse.app.update.GitHubReleaseInfo
 import com.moodlepulse.app.widget.MoodleWidgetProvider
 import kotlinx.coroutines.launch
+import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -121,6 +128,20 @@ class MainActivity : ComponentActivity() {
             MoodlePulseTheme {
                 val state by viewModel.uiState.collectAsState()
                 val snackbarHostState = remember { SnackbarHostState() }
+                val app = application as MoodlePulseApp
+                var pendingInstallFile by remember { mutableStateOf<File?>(null) }
+
+                val installPermissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) {
+                    val file = pendingInstallFile
+                    if (file != null && file.exists() && app.updateManager.canInstallPackages()) {
+                        pendingInstallFile = null
+                        startActivity(app.updateManager.createInstallApkIntent(file))
+                    } else if (file != null) {
+                        pendingInstallFile = null
+                    }
+                }
 
                 LaunchedEffect(state.statusBanner) {
                     val msg = state.statusBanner
@@ -128,6 +149,37 @@ class MainActivity : ComponentActivity() {
                         snackbarHostState.showSnackbar(msg)
                         viewModel.clearBanner()
                     }
+                }
+
+                LaunchedEffect(state.updateState.pendingInstallTrigger) {
+                    if (state.updateState.pendingInstallTrigger) {
+                        viewModel.consumeInstallTrigger()
+                        val apkFile = state.updateState.downloadedApkFile
+                        if (apkFile != null && apkFile.exists()) {
+                            if (app.updateManager.canInstallPackages()) {
+                                startActivity(app.updateManager.createInstallApkIntent(apkFile))
+                            } else {
+                                pendingInstallFile = apkFile
+                                installPermissionLauncher.launch(app.updateManager.createInstallPermissionIntent())
+                            }
+                        }
+                    }
+                }
+
+                val availableRelease = state.updateState.availableUpdate
+                if (state.updateState.showUpdateDialog && availableRelease != null) {
+                    AppUpdateDialog(
+                        release = availableRelease,
+                        isDownloading = state.updateState.isDownloading,
+                        progressPercent = state.updateState.downloadProgressPercent,
+                        hasDownloadedApk = state.updateState.downloadedApkFile?.exists() == true,
+                        onDownloadAndInstall = viewModel::downloadAndInstallUpdate,
+                        onOpenReleasePage = {
+                            openUrlInBrowser(this@MainActivity, availableRelease.htmlUrl)
+                        },
+                        onSkipVersion = { viewModel.dismissUpdateDialog(skipThisVersion = true) },
+                        onDismiss = { viewModel.dismissUpdateDialog(skipThisVersion = false) }
+                    )
                 }
 
                 if (!state.isLoggedIn) {
@@ -1151,7 +1203,303 @@ private fun SettingsTab(
                 }
             }
         }
+
+        // GitHub self-update card
+        GitHubUpdateCard(
+            state = state,
+            onSaveRepo = viewModel::updateGitHubRepo,
+            onToggleAutoCheck = viewModel::updateAutoCheckAppUpdate,
+            onSaveToken = viewModel::saveGitHubToken,
+            onCheckNow = { viewModel.checkForAppUpdate(manual = true) },
+            onDownloadAndInstall = viewModel::downloadAndInstallUpdate,
+            onOpenReleaseUrl = { url -> openUrlInBrowser(context, url) }
+        )
     }
+}
+
+@Composable
+private fun GitHubUpdateCard(
+    state: MainUiState,
+    onSaveRepo: (String) -> Unit,
+    onToggleAutoCheck: (Boolean) -> Unit,
+    onSaveToken: (String) -> Unit,
+    onCheckNow: () -> Unit,
+    onDownloadAndInstall: () -> Unit,
+    onOpenReleaseUrl: (String) -> Unit
+) {
+    var repoInput by remember(state.settings.githubUpdateRepo) {
+        mutableStateOf(state.settings.githubUpdateRepo)
+    }
+    var showTokenField by rememberSaveable { mutableStateOf(false) }
+    var tokenInput by remember { mutableStateOf("") }
+    val updateState = state.updateState
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("GitHub 自我更新", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = "目前版本：v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("開啟 App 時自動檢查更新", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = state.settings.autoCheckAppUpdate,
+                    onCheckedChange = onToggleAutoCheck
+                )
+            }
+
+            OutlinedTextField(
+                value = repoInput,
+                onValueChange = { repoInput = it },
+                label = { Text("GitHub Repo（owner/repo）") },
+                placeholder = { Text("例如 Senerity-234/moodle-pulse") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { onSaveRepo(repoInput) },
+                    enabled = repoInput.isNotBlank() && repoInput.trim() != state.settings.githubUpdateRepo,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("儲存來源")
+                }
+                Button(
+                    onClick = onCheckNow,
+                    enabled = !updateState.isChecking && !updateState.isDownloading,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (updateState.isChecking) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    Text("立即檢查更新")
+                }
+            }
+
+            if (!updateState.statusMessage.isNullOrBlank()) {
+                Text(
+                    text = updateState.statusMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            val release = updateState.availableUpdate
+            if (release != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "可更新至 ${release.tagName}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        if (release.releaseNotes.isNotBlank()) {
+                            Text(
+                                text = release.releaseNotes,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 4,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                        if (updateState.isDownloading) {
+                            LinearProgressIndicator(
+                                progress = { updateState.downloadProgressPercent / 100f },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                text = "下載中 ${updateState.downloadProgressPercent}%",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        val hasApk = !release.apkDownloadUrl.isNullOrBlank() || !release.apkAssetApiUrl.isNullOrBlank()
+                        if (hasApk) {
+                            Button(
+                                onClick = onDownloadAndInstall,
+                                enabled = !updateState.isDownloading,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    if (updateState.downloadedApkFile?.exists() == true) {
+                                        "立即安裝 ${release.tagName} APK"
+                                    } else {
+                                        "下載並覆蓋安裝 ${release.tagName}"
+                                    }
+                                )
+                            }
+                        } else if (release.htmlUrl.isNotBlank()) {
+                            OutlinedButton(
+                                onClick = { onOpenReleaseUrl(release.htmlUrl) },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("前往 GitHub Release 下載")
+                            }
+                        }
+                    }
+                }
+            }
+
+            TextButton(
+                onClick = { showTokenField = !showTokenField },
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Icon(
+                    if (showTokenField) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    if (state.updateState.hasGitHubTokenSaved) {
+                        "私人 Repo Token（已儲存）"
+                    } else {
+                        "進階：私人 Repo Token（公開 Repo 免填）"
+                    }
+                )
+            }
+
+            AnimatedVisibility(visible = showTokenField) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "若你的 GitHub Repo 設為 Private，需填入具備 Releases 讀取權限的 Personal Access Token（僅加密儲存在本機）。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = tokenInput,
+                        onValueChange = { tokenInput = it },
+                        label = { Text("GitHub Personal Access Token（選填）") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                onSaveToken(tokenInput)
+                                tokenInput = ""
+                            },
+                            enabled = tokenInput.isNotBlank()
+                        ) {
+                            Text("儲存 Token")
+                        }
+                        if (updateState.hasGitHubTokenSaved) {
+                            TextButton(onClick = { onSaveToken("") }) {
+                                Text("清除 Token")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppUpdateDialog(
+    release: GitHubReleaseInfo,
+    isDownloading: Boolean,
+    progressPercent: Int,
+    hasDownloadedApk: Boolean,
+    onDownloadAndInstall: () -> Unit,
+    onOpenReleasePage: () -> Unit,
+    onSkipVersion: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val hasApk = !release.apkDownloadUrl.isNullOrBlank() || !release.apkAssetApiUrl.isNullOrBlank()
+    AlertDialog(
+        onDismissRequest = { if (!isDownloading) onDismiss() },
+        icon = { Icon(Icons.Default.SystemUpdate, contentDescription = null) },
+        title = { Text("發現新版本 ${release.tagName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "目前版本：v${BuildConfig.VERSION_NAME} → 最新版本：${release.tagName}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                if (release.releaseNotes.isNotBlank()) {
+                    Text(
+                        text = release.releaseNotes,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 8,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (isDownloading) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { progressPercent / 100f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        text = "正在下載更新檔... $progressPercent%",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (hasApk) {
+                Button(
+                    onClick = onDownloadAndInstall,
+                    enabled = !isDownloading
+                ) {
+                    Text(
+                        when {
+                            isDownloading -> "下載中..."
+                            hasDownloadedApk -> "立即安裝"
+                            else -> "下載並更新"
+                        }
+                    )
+                }
+            } else if (release.htmlUrl.isNotBlank()) {
+                Button(onClick = onOpenReleasePage) {
+                    Text("前往 Release")
+                }
+            }
+        },
+        dismissButton = {
+            Row {
+                if (!isDownloading) {
+                    TextButton(onClick = onSkipVersion) {
+                        Text("略過此版")
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("稍後")
+                    }
+                }
+            }
+        }
+    )
 }
 
 private fun openUrlInBrowser(context: android.content.Context, url: String) {

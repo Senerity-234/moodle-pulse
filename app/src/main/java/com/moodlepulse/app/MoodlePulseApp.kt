@@ -7,6 +7,7 @@ import com.moodlepulse.app.data.SecureTokenStore
 import com.moodlepulse.app.network.MoodleApiClient
 import com.moodlepulse.app.sync.MoodleSyncManager
 import com.moodlepulse.app.sync.MoodleSyncWorker
+import com.moodlepulse.app.update.GitHubUpdateManager
 
 class MoodlePulseApp : Application() {
 
@@ -25,6 +26,9 @@ class MoodlePulseApp : Application() {
     lateinit var syncManager: MoodleSyncManager
         private set
 
+    lateinit var updateManager: GitHubUpdateManager
+        private set
+
     override fun onCreate() {
         super.onCreate()
         tokenStore = SecureTokenStore(this)
@@ -38,6 +42,7 @@ class MoodlePulseApp : Application() {
             tokenStore = tokenStore,
             calendarSyncManager = calendarSyncManager
         )
+        updateManager = GitHubUpdateManager(this)
 
         val settings = cacheRepository.getSettings()
         if (!tokenStore.getMoodleToken().isNullOrBlank()) {
